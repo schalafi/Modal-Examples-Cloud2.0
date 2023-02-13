@@ -2,22 +2,25 @@ import os
 import pathlib
 import modal 
 
-FILE_DIR = os.path.dirname(__file__)
+def check_dir(dir_path:str):
+    """
+    dir_path: str
+        check  of the dir exists 
+        if not, it will create it.
+    """
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+
+THIS_FILE_DIR = os.path.dirname(__file__)
 DIR = 'tmp/screenshots'
+DIR_PATH = os.path.join(THIS_FILE_DIR,DIR)
 
 #Make sure screenshots dir exists
-def create_screenshots_dir():
-    SCREENSHOTS_DIR = os.path.join(FILE_DIR, DIR)
-    print("SCREENSHOTS_DIR: ", SCREENSHOTS_DIR)
-    if not os.path.exists(SCREENSHOTS_DIR):
-        os.makedirs(SCREENSHOTS_DIR)
-
-
-create_screenshots_dir()
+check_dir(DIR_PATH)
 
 stub = modal.Stub("example-screenshot")
 #Run inside this file dir or outside :D
-###RUN modal run screenshot.py --url https://www.youtube.com/watch?v=aeWyp2vXxqA
+###RUN: modal run screenshot.py --url https://www.youtube.com/watch?v=aeWyp2vXxqA
 ###Needs playwright locally
 
 #Define the image (OS) with dependencies
@@ -51,8 +54,8 @@ async def screenshot(url):
 def main(url: str = "https://modal.com"):
 
     filename = pathlib.Path(
-        os.path.join(FILE_DIR,
-            "tmp/screenshots/screenshot.png"))
+        os.path.join(DIR_PATH,
+            "screenshot.png"))
     print("Filename: ", filename)
     data = screenshot.call(url)
     filename.parent.mkdir(exist_ok=True)
