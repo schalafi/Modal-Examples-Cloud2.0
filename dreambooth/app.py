@@ -13,7 +13,21 @@ from fastapi import FastAPI
 
 from modal import Image, Mount, Secret, SharedVolume, Stub, asgi_app, method
 
-### Crop images with https://www.birme.net/ ###
+###STEP 1 
+#Create the instance_example_urls.txt file
+#Put your images (all with the same HxW required by the model)
+#in the image_set folder
+###Use this to crop images --> https://www.birme.net/ ###
+
+###STEP 2
+#Run handle_image_set.py to create the file automatically instance_example_urls.txt file
+#You need to set up your AWS credentials first
+#AWS_ACCESS_KEY_ID 
+#AWS_SECRET_ACCESS_KEY
+
+###STEP 3
+#Follow the instruction in this file
+#Also found in https://modal.com/docs/guide/ex/dreambooth_app
 
 web_app = FastAPI()
 assets_path = Path(__file__).parent / "assets"
