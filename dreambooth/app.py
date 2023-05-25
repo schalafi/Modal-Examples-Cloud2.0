@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from modal import Image, Mount, Secret, SharedVolume, Stub, asgi_app, method
 
+### Crop images with https://www.birme.net/ ###
 
 web_app = FastAPI()
 assets_path = Path(__file__).parent / "assets"
@@ -67,10 +68,10 @@ class SharedConfig:
     """Configuration information shared across project components."""
 
     # The instance name is the "proper noun" we're teaching the model
-    instance_name: str = "Qwerty"
+    instance_name: str = "Qwerty" #Optionally CHANGE
     # That proper noun is usually a member of some class (person, bird),
     # and sharing that information with the model helps it generalize better.
-    class_name: str = "Golden Retriever"
+    class_name: str = "Person" #CHANGE
 
 
 @dataclass
@@ -79,7 +80,7 @@ class TrainConfig(SharedConfig):
 
     # training prompt looks like `{PREFIX} {INSTANCE_NAME} the {CLASS_NAME} {POSTFIX}`
     prefix: str = "a photo of"
-    postfix: str = ""
+    postfix: str = "" #CHANGE describe your concept images here
 
     # locator for plaintext file with urls for images of target instance
     instance_example_urls_file: str = str(
@@ -159,7 +160,7 @@ Tip: if the results you’re seeing don’t match the prompt too well, and inste
         ): volume,  # fine-tuned model will be stored at `MODEL_DIR`
     },
     timeout=1800,  # 30 minutes
-    secrets=[Secret.from_name("huggingface")],
+    secrets=[Secret.from_name("my-huggingface-secret-read")],
 )
 def train(instance_example_urls):
     import subprocess
