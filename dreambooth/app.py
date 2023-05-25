@@ -174,7 +174,7 @@ Tip: if the results you’re seeing don’t match the prompt too well, and inste
         ): volume,  # fine-tuned model will be stored at `MODEL_DIR`
     },
     timeout=1800,  # 30 minutes
-    secrets=[Secret.from_name("my-huggingface-secret-read")],
+    secrets=[Secret.from_name("my-huggingface-secret-read")], #need a huggingface token for reading the model
 )
 def train(instance_example_urls):
     import subprocess
