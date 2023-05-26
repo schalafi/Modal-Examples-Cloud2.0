@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from modal import Image, Mount, Secret, SharedVolume, Stub, asgi_app, method
+from modal import Image, Mount, Secret, SharedVolume, Stub,gpu, asgi_app, method
 
 ###STEP 1 
 #Create the instance_example_urls.txt file
@@ -50,6 +50,7 @@ image = (
         "torch",
         "torchvision",
         "triton",
+        #"bitsandbytes"
     )
     .pip_install("xformers", pre=True)
     .apt_install("git")
@@ -82,10 +83,10 @@ class SharedConfig:
     """Configuration information shared across project components."""
 
     # The instance name is the "proper noun" we're teaching the model
-    instance_name: str = "Qwerty" #Optionally CHANGE
+    instance_name: str = "zwx" #Optionally CHANGE
     # That proper noun is usually a member of some class (person, bird),
     # and sharing that information with the model helps it generalize better.
-    class_name: str = "Person" #CHANGE
+    class_name: str = "person" #CHANGE
 
 
 @dataclass
@@ -93,8 +94,8 @@ class TrainConfig(SharedConfig):
     """Configuration for the finetuning step."""
 
     # training prompt looks like `{PREFIX} {INSTANCE_NAME} the {CLASS_NAME} {POSTFIX}`
-    prefix: str = "a photo of"
-    postfix: str = "" #CHANGE describe your concept images here
+    prefix: str = "photo of"
+    postfix: str = "programming" #CHANGE describe your concept images here
 
     # locator for plaintext file with urls for images of target instance
     instance_example_urls_file: str = str(
@@ -102,7 +103,7 @@ class TrainConfig(SharedConfig):
     )
 
     # identifier for pretrained model on Hugging Face
-    model_name: str = "runwayml/stable-diffusion-v1-5"
+    model_name: str = "stabilityai/stable-diffusion-2-1"
 
     # Hyperparameters/constants from the huggingface training example
     resolution: int = 512
@@ -113,7 +114,6 @@ class TrainConfig(SharedConfig):
     lr_warmup_steps: int = 0
     max_train_steps: int = 600
     checkpointing_steps: int = 1000
-
 
 @dataclass
 class AppConfig(SharedConfig):
@@ -143,6 +143,23 @@ def load_images(image_urls):
 
     return IMG_PATH
 
+def create_interpolation_function(points):
+    import numpy as np
+    def interpolate(x):
+        # Extract the x and y values from the points list
+        x_values, y_values = zip(*points)
+
+        # Use the numpy polyfit function to fit a polynomial function to the data
+        coefficients = np.polyfit(x_values, y_values, len(points) - 1)
+
+        # Use the numpy polyval function to evaluate the polynomial function at x
+        y = np.polyval(coefficients, x)
+
+        # Round the result to the nearest integer
+        y = int(round(y))
+        return y
+    return interpolate
+
 """
 Finetuning a text-to-image model
 
@@ -167,7 +184,7 @@ Tip: if the results you’re seeing don’t match the prompt too well, and inste
 
 @stub.function(
     image=image,
-    gpu="A100",  # finetuning is VRAM hungry, so this should be an A100
+    gpu=gpu.A100(memory=40),#"A100" str or class gpu,  # finetuning is VRAM hungry, so this should be an A100
     shared_volumes={
         str(
             MODEL_DIR
@@ -182,6 +199,16 @@ def train(instance_example_urls):
     import huggingface_hub
     from accelerate.utils import write_basic_config
     from transformers import CLIPTokenizer
+
+    #number of finetuning images
+    n_images = len(instance_example_urls)
+    #number of class images for prior preservation
+    N_CLASS_IMAGES= n_images*10
+
+    interpolate_max_train_steps = create_interpolation_function(
+    [(10, 1611), (11, 1750), (15, 2281)])
+    MAX_TRAIN_STEPS = int(interpolate_max_train_steps(n_images))
+    print(f"MAX_TRAIN_STEPS: {MAX_TRAIN_STEPS}")
 
     # set up TrainConfig
     config = TrainConfig()
@@ -207,24 +234,40 @@ def train(instance_example_urls):
     # define the training prompt
     instance_phrase = f"{config.instance_name} {config.class_name}"
     prompt = f"{config.prefix} {instance_phrase} {config.postfix}".strip()
+    
+    INSTANCE_PROMPT = f"{TrainConfig.prefix} {SharedConfig.instance_name} the {SharedConfig.class_name} {TrainConfig.postfix}".strip()
+    CLASS_PROMPT = f"photograph of {SharedConfig.class_name}".strip()
+
+    print("instance prhase: ", instance_phrase)
+    print("prompt: ", prompt)
+    print("INSTANCE_PROMPT: ", INSTANCE_PROMPT)
+    print("CLASS_PROMPT: ", CLASS_PROMPT)
 
     # run training -- see huggingface accelerate docs for details
     subprocess.run(
-        [
-            "accelerate",
+        [   "accelerate",
             "launch",
             "examples/dreambooth/train_dreambooth.py",
-            "--train_text_encoder",  # needs at least 16GB of GPU RAM.
             f"--pretrained_model_name_or_path={config.model_name}",
+            "--revision=fp16",
+            "--train_text_encoder",  # needs at least 16GB of GPU RAM.
             f"--instance_data_dir={img_path}",
             f"--output_dir={MODEL_DIR}",
-            f"--instance_prompt='{prompt}'",
+            #"--with_prior_preservation", #needs more than 40GB of GPU RAM
+            #"--prior_loss_weight=1.0", 
+            #"--use_8bit_adam",
+            "--mixed_precision=fp16",
+            f"--instance_prompt= {INSTANCE_PROMPT}",
+            #f"--class_prompt={CLASS_PROMPT}",
+            #f"--class_data_dir=/{SharedConfig.class_name}",
+
             f"--resolution={config.resolution}",
             f"--train_batch_size={config.train_batch_size}",
             f"--gradient_accumulation_steps={config.gradient_accumulation_steps}",
             f"--learning_rate={config.learning_rate}",
             f"--lr_scheduler={config.lr_scheduler}",
             f"--lr_warmup_steps={config.lr_warmup_steps}",
+            f"--num_class_images={N_CLASS_IMAGES}",
             f"--max_train_steps={config.max_train_steps}",
             f"--checkpointing_steps={config.checkpointing_steps}",
         ],
@@ -234,8 +277,8 @@ def train(instance_example_urls):
 """
 The inference function.
 
-To generate images from prompts using our fine-tuned model, we define a function called inference. In order to initialize the model just once on container startup, we use Modal’s container lifecycle feature, which requires the function to be part of a class. The shared volume is mounted at MODEL_DIR, so that the fine-tuned model created by train is then available to inference."""
-
+To generate images from prompts using our fine-tuned model, we define a function called inference. In order to initialize the model just once on container startup, we use Modal’s container lifecycle feature, which requires the function to be part of a class. The shared volume is mounted at MODEL_DIR, so that the fine-tuned model created by train is then available to inference.
+"""
 
 @stub.cls(
     image=image,
