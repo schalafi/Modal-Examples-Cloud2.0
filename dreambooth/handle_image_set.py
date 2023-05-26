@@ -30,6 +30,7 @@ def create_presigned_url(bucket_name, object_name, expiration=3600):
                                                     ExpiresIn=expiration)
     except ClientError as e:
         logging.error(e)
+        print("Error: ",e)
         return None
 
     # The response contains the presigned URL
@@ -38,6 +39,7 @@ def create_presigned_url(bucket_name, object_name, expiration=3600):
 # Create a boto3 S3 client
 s3 = boto3.client('s3')
 MY_BUCKET = 'my-dreambooth'#Use your bucket name
+URLS_FILE = 'instance_example_urls.txt'
 
 # Get the directory name where the images are located (these images are in your computer)
 dir_name = 'image_set'
@@ -49,16 +51,17 @@ if not os.path.exists(dir_name):
 images = os.listdir(dir_name)
 
 # Generate presigned URLs for each image
-for image in images:
-    # Generate a presigned POST URL for the image
-    presigned_url = create_presigned_url(
-        bucket_name=MY_BUCKET,
-        object_name=image,
-        expiration=3600#3600seconds = 1 hour
-        )
-    
-    # Write the presigned URL to a file
-    with open('instance_example_urls.txt', 'a') as f:
+with open(URLS_FILE,'w') as f:
+    for image in images:
+        # Generate a presigned POST URL for the image
+        presigned_url = create_presigned_url(
+            bucket_name=MY_BUCKET,
+            object_name=image,
+            expiration=3600#3600seconds = 1 hour
+            )
+        print("Url: {} generated for image: {}".format(presigned_url, image))
+        
+        # Write the presigned URL to a file
         f.write(presigned_url + '\n')
 
 # Upload the images to S3
