@@ -89,13 +89,18 @@ class SharedConfig:
     class_name: str = "person" #CHANGE
 
 
+IMAGE_RESOLUTION = 512
+
 @dataclass
 class TrainConfig(SharedConfig):
     """Configuration for the finetuning step."""
 
     # training prompt looks like `{PREFIX} {INSTANCE_NAME} the {CLASS_NAME} {POSTFIX}`
-    prefix: str = "photo of"
-    postfix: str = "programming" #CHANGE describe your concept images here
+    prefix: str = "photo of" #"art by [yourname]",
+    postfix: str = "" #CHANGE describe your concept images here
+    #If you are definied a style of art
+    #"instance_prompt":      "art by [yourname]",
+    #"class_prompt":         "art by a person",
 
     # locator for plaintext file with urls for images of target instance
     instance_example_urls_file: str = str(
@@ -103,17 +108,19 @@ class TrainConfig(SharedConfig):
     )
 
     # identifier for pretrained model on Hugging Face
-    model_name: str = "stabilityai/stable-diffusion-2-1"
+    model_name: str ="stabilityai/stable-diffusion-2"#"runwayml/stable-diffusion-v1-5" #"stabilityai/stable-diffusion-2-1"
 
     # Hyperparameters/constants from the huggingface training example
-    resolution: int = 512
+    resolution: int = IMAGE_RESOLUTION
     train_batch_size: int = 1
     gradient_accumulation_steps: int = 1
     learning_rate: float = 2e-6
     lr_scheduler: str = "constant"
     lr_warmup_steps: int = 0
-    max_train_steps: int = 600
-    checkpointing_steps: int = 1000
+    #Compute max_train_steps from the number of images in the instance_example_urls_file
+    #on train function
+    #max_train_steps: int = 600
+    checkpointing_steps: int = 500
 
 @dataclass
 class AppConfig(SharedConfig):
@@ -121,6 +128,8 @@ class AppConfig(SharedConfig):
 
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
+    height: int = IMAGE_RESOLUTION
+    width: int = IMAGE_RESOLUTION
 
 """
 Get finetuning dataset
@@ -184,7 +193,7 @@ Tip: if the results you’re seeing don’t match the prompt too well, and inste
 
 @stub.function(
     image=image,
-    gpu=gpu.A100(memory=40),#"A100" str or class gpu,  # finetuning is VRAM hungry, so this should be an A100
+    gpu=gpu.A100(memory=40),#finetuning is VRAM hungry, so this should be an A100
     shared_volumes={
         str(
             MODEL_DIR
@@ -208,7 +217,7 @@ def train(instance_example_urls):
     interpolate_max_train_steps = create_interpolation_function(
     [(10, 1611), (11, 1750), (15, 2281)])
     MAX_TRAIN_STEPS = int(interpolate_max_train_steps(n_images))
-    print(f"MAX_TRAIN_STEPS: {MAX_TRAIN_STEPS}")
+    print(f"MAX_TRAIN_STEPS: {MAX_TRAIN_STEPS}")  
 
     # set up TrainConfig
     config = TrainConfig()
@@ -235,28 +244,28 @@ def train(instance_example_urls):
     instance_phrase = f"{config.instance_name} {config.class_name}"
     prompt = f"{config.prefix} {instance_phrase} {config.postfix}".strip()
     
-    INSTANCE_PROMPT = f"{TrainConfig.prefix} {SharedConfig.instance_name} the {SharedConfig.class_name} {TrainConfig.postfix}".strip()
+    INSTANCE_PROMPT = f"{TrainConfig.prefix} {SharedConfig.instance_name} {SharedConfig.class_name} {TrainConfig.postfix}".strip()
     CLASS_PROMPT = f"photograph of {SharedConfig.class_name}".strip()
 
     print("instance prhase: ", instance_phrase)
     print("prompt: ", prompt)
     print("INSTANCE_PROMPT: ", INSTANCE_PROMPT)
     print("CLASS_PROMPT: ", CLASS_PROMPT)
-
+    print("MAX_TRAIN_STEPS: ", MAX_TRAIN_STEPS)
     # run training -- see huggingface accelerate docs for details
     subprocess.run(
         [   "accelerate",
             "launch",
             "examples/dreambooth/train_dreambooth.py",
             f"--pretrained_model_name_or_path={config.model_name}",
-            "--revision=fp16",
+            #"--revision=fp16",
             "--train_text_encoder",  # needs at least 16GB of GPU RAM.
             f"--instance_data_dir={img_path}",
             f"--output_dir={MODEL_DIR}",
             #"--with_prior_preservation", #needs more than 40GB of GPU RAM
             #"--prior_loss_weight=1.0", 
             #"--use_8bit_adam",
-            "--mixed_precision=fp16",
+            #"--mixed_precision=fp16",
             f"--instance_prompt= {INSTANCE_PROMPT}",
             #f"--class_prompt={CLASS_PROMPT}",
             #f"--class_data_dir=/{SharedConfig.class_name}",
@@ -264,11 +273,12 @@ def train(instance_example_urls):
             f"--resolution={config.resolution}",
             f"--train_batch_size={config.train_batch_size}",
             f"--gradient_accumulation_steps={config.gradient_accumulation_steps}",
+            #f"--gradient_checkpointing",
             f"--learning_rate={config.learning_rate}",
             f"--lr_scheduler={config.lr_scheduler}",
             f"--lr_warmup_steps={config.lr_warmup_steps}",
-            f"--num_class_images={N_CLASS_IMAGES}",
-            f"--max_train_steps={config.max_train_steps}",
+            #f"--num_class_images={N_CLASS_IMAGES}",
+            f"--max_train_steps={MAX_TRAIN_STEPS}",
             f"--checkpointing_steps={config.checkpointing_steps}",
         ],
         check=True,
@@ -288,25 +298,40 @@ To generate images from prompts using our fine-tuned model, we define a function
 class Model:
     def __enter__(self):
         import torch
-        from diffusers import DDIMScheduler, StableDiffusionPipeline
+        from diffusers import DPMSolverMultistepScheduler, DDIMScheduler, StableDiffusionPipeline,DiffusionPipeline
 
+        #FOR 1.5 and 2.0 versions
         # set up a hugging face inference pipeline using our model
-        ddim = DDIMScheduler.from_pretrained(MODEL_DIR, subfolder="scheduler")
+        ddim = DDIMScheduler.from_pretrained(MODEL_DIR,
+            subfolder="scheduler")
         pipe = StableDiffusionPipeline.from_pretrained(
             MODEL_DIR,
             scheduler=ddim,
             torch_dtype=torch.float16,
             safety_checker=None,
         ).to("cuda")
-        pipe.enable_xformers_memory_efficient_attention()
         self.pipe = pipe
+
+        #FOR 2.1 version ***BUGGY***
+        # Use the DPMSolverMultistepScheduler (DPM-Solver++) scheduler here instead
+        """pipe = StableDiffusionPipeline.from_pretrained(
+            MODEL_DIR,
+            torch_dtype=torch.float16) 
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+        pipe = pipe.to("cuda")
+        pipe.enable_xformers_memory_efficient_attention()
+        self.pipe = pipe"""
 
     @method()
     def inference(self, text, config):
         image = self.pipe(
             text,
+            height=config.height,
+            width=config.width,
+            negative_prompt = "ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, bad anatomy, bad proportions, cloned face, disfigured, out of frame, extra limbs, bad anatomy, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, mutated hands, fused fingers, too many fingers, long neck, text, letters, signature, web address, copyright name, username, error, extra digit, fewer digits, loadscreen, grid, stock image, a stock photo, promo poster, fat",
             num_inference_steps=config.num_inference_steps,
             guidance_scale=config.guidance_scale,
+
         ).images[0]
 
         return image
@@ -324,7 +349,7 @@ You can deploy the app on Modal forever with the command modal deploy dreambooth
 
 @stub.function(
     image=image,
-    concurrency_limit=3,
+    concurrency_limit=1,
     mounts=[Mount.from_local_dir(assets_path, remote_path="/assets")],
 )
 @asgi_app()
