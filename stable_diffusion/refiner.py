@@ -124,8 +124,49 @@ def main(prompt: str):
 
     filename = prompt.strip().replace(" ", '-')
     output_path =os.path.join(dir , (filename + ".png"))
-    print("Saving ouput image as: ", output_path)
     print(f"Saving it to {output_path}")
     with open(output_path, "wb") as f:
         f.write(image_bytes)
 
+
+
+"""
+A user interface
+
+Here we ship a simple web application that exposes a front-end (written in Alpine.js) for our backend deployment.
+
+The Model class will serve multiple users from a its own shared pool of warm GPU containers automatically.
+
+We can deploy this with modal deploy stable_diffusion_xl.py."""
+
+# Deploy as a web app with an user interface
+### RUN: modal deploy refiner.py 
+
+
+frontend_path = Path(__file__).parent / "frontend"
+
+
+@stub.function(
+    mounts=[Mount.from_local_dir(frontend_path, remote_path="/assets")],
+    allow_concurrent_inputs=20,
+)
+@asgi_app()
+def app():
+    import fastapi.staticfiles
+    from fastapi import FastAPI
+
+    web_app = FastAPI()
+
+    @web_app.get("/infer/{prompt}")
+    async def infer(prompt: str):
+        from fastapi.responses import Response
+
+        image_bytes = Model().inference.remote(prompt)
+
+        return Response(image_bytes, media_type="image/png")
+
+    web_app.mount(
+        "/", fastapi.staticfiles.StaticFiles(directory="/assets", html=True)
+    )
+
+    return web_app
