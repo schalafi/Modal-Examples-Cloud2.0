@@ -11,7 +11,16 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from modal import Image, Mount, Secret, SharedVolume, Stub,gpu, asgi_app, method
+from modal import (
+    Image,
+    Mount,
+    Secret,
+    Stub,
+    Volume,
+    asgi_app,
+    method,
+    gpu
+)
 
 ###STEP 1 
 #Create the instance_example_urls.txt file
@@ -21,13 +30,21 @@ from modal import Image, Mount, Secret, SharedVolume, Stub,gpu, asgi_app, method
 
 ###STEP 2
 #Run handle_image_set.py to create the file automatically instance_example_urls.txt file
-#You need to set up your AWS credentials first
+#You need to set up your AWS credentials first (as environment variables)
 #AWS_ACCESS_KEY_ID 
 #AWS_SECRET_ACCESS_KEY
 
 ###STEP 3
 #Follow the instruction in this file
 #Also found in https://modal.com/docs/guide/ex/dreambooth_app
+
+###Step 4 Train the model
+### modal run app.py will train the model
+### run the train function 
+
+###Step 5 Deploy app
+### modal serve app.py will serve the Gradio interface at a temporarily location.
+### modal shell app.py is a convenient helper to open a bash shell in our image (for debugging)
 
 web_app = FastAPI()
 assets_path = Path(__file__).parent / "assets"
@@ -41,36 +58,34 @@ GIT_SHA = "ed616bd8a8740927770eebe017aedb6204c6105f"
 image = (
     Image.debian_slim(python_version="3.10")
     .pip_install(
-        "accelerate",
-        "datasets",
+        #for stable diffusion exta large
+        "diffusers~=0.19",
+        "invisible_watermark~=0.1",
+        "transformers~=4.31",
+        "accelerate~=0.21",
+        "safetensors~=0.3",
+
+        # for dreeambooth
+        "datasets~=2.13",
         "ftfy",
         "gradio~=3.10",
         "smart_open",
-        "transformers",
         "torch",
         "torchvision",
         "triton",
-        #"bitsandbytes"
     )
     .pip_install("xformers", pre=True)
-    .apt_install("git")
-    # Perform a shallow fetch of just the target `diffusers` commit, checking out
-    # the commit in the container's current working directory, /root. Then install
-    # the `diffusers` package.
-    .run_commands(
-        "cd /root && git init .",
-        "cd /root && git remote add origin https://github.com/huggingface/diffusers",
-        f"cd /root && git fetch --depth=1 origin {GIT_SHA} && git checkout {GIT_SHA}",
-        "cd /root && pip install -e .",
-    )
+    .apt_install("git","libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1")
+
 )
 
 
 """
 A persistent shared volume will store model artefacts across Modal app runs. This is crucial as finetuning runs are separate from the Gradio app we run as a webhook.
 """
-volume = SharedVolume().persist("dreambooth-finetuning-vol")
+volume = Volume.persisted("dreambooth-finetuning-vol")
 MODEL_DIR = Path("/model")
+stub.volume = volume 
 
 """
 Config
@@ -88,15 +103,16 @@ class SharedConfig:
     # and sharing that information with the model helps it generalize better.
     class_name: str = "person" #CHANGE
 
-
-IMAGE_RESOLUTION = 512
+# Use this img resolution for extra-large-1.0 model
+#https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_xl
+IMAGE_RESOLUTION = 1024
 
 @dataclass
 class TrainConfig(SharedConfig):
     """Configuration for the finetuning step."""
 
     # training prompt looks like `{PREFIX} {INSTANCE_NAME} the {CLASS_NAME} {POSTFIX}`
-    prefix: str = "photo of" #"art by [yourname]",
+    prefix: str = "a photo of" #"art by [yourname]",
     postfix: str = "" #CHANGE describe your concept images here
     #If you are definied a style of art
     #"instance_prompt":      "art by [yourname]",
@@ -108,7 +124,7 @@ class TrainConfig(SharedConfig):
     )
 
     # identifier for pretrained model on Hugging Face
-    model_name: str ="stabilityai/stable-diffusion-2"#"runwayml/stable-diffusion-v1-5" #"stabilityai/stable-diffusion-2-1"
+    model_name: str ="stabilityai/stable-diffusion-xl-base-1.0"
 
     # Hyperparameters/constants from the huggingface training example
     resolution: int = IMAGE_RESOLUTION
@@ -169,6 +185,7 @@ def create_interpolation_function(points):
         return y
     return interpolate
 
+
 """
 Finetuning a text-to-image model
 
@@ -194,7 +211,7 @@ Tip: if the results you’re seeing don’t match the prompt too well, and inste
 @stub.function(
     image=image,
     gpu=gpu.A100(memory=40),#finetuning is VRAM hungry, so this should be an A100
-    shared_volumes={
+    volumes={
         str(
             MODEL_DIR
         ): volume,  # fine-tuned model will be stored at `MODEL_DIR`
@@ -252,37 +269,62 @@ def train(instance_example_urls):
     print("INSTANCE_PROMPT: ", INSTANCE_PROMPT)
     print("CLASS_PROMPT: ", CLASS_PROMPT)
     print("MAX_TRAIN_STEPS: ", MAX_TRAIN_STEPS)
+
     # run training -- see huggingface accelerate docs for details
-    subprocess.run(
-        [   "accelerate",
+    
+    def _exec_subprocess(cmd: list[str]):
+        """Executes subprocess and prints log to terminal while subprocess is running."""
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        with process.stdout as pipe:
+            for line in iter(pipe.readline, b""):
+                line_str = line.decode()
+                print(f"{line_str}", end="")
+
+        if exitcode := process.wait() != 0:
+            raise subprocess.CalledProcessError(exitcode, "\n".join(cmd))
+
+    # run training -- see huggingface accelerate docs for details
+    print("\033[96m {}\033[00m" .format("Launching dreambooth training script"))
+    _exec_subprocess(
+        [
+            "accelerate",
             "launch",
             "examples/dreambooth/train_dreambooth.py",
-            f"--pretrained_model_name_or_path={config.model_name}",
-            #"--revision=fp16",
             "--train_text_encoder",  # needs at least 16GB of GPU RAM.
+            f"--pretrained_model_name_or_path={config.model_name}",
             f"--instance_data_dir={img_path}",
             f"--output_dir={MODEL_DIR}",
+            f"--instance_prompt='{prompt}'",
+            f"--resolution={config.resolution}",
+            f"--train_batch_size={config.train_batch_size}",
+            f"--gradient_accumulation_steps={config.gradient_accumulation_steps}",
+            f"--learning_rate={config.learning_rate}",
+            f"--lr_scheduler={config.lr_scheduler}",
+            f"--lr_warmup_steps={config.lr_warmup_steps}",
+            f"--max_train_steps={config.max_train_steps}",
+            f"--checkpointing_steps={config.checkpointing_steps}",
+            #Prior preservation
             #"--with_prior_preservation", #needs more than 40GB of GPU RAM
             #"--prior_loss_weight=1.0", 
             #"--use_8bit_adam",
             #"--mixed_precision=fp16",
-            f"--instance_prompt= {INSTANCE_PROMPT}",
+            #f"--instance_prompt= {INSTANCE_PROMPT}",
             #f"--class_prompt={CLASS_PROMPT}",
             #f"--class_data_dir=/{SharedConfig.class_name}",
-
-            f"--resolution={config.resolution}",
-            f"--train_batch_size={config.train_batch_size}",
-            f"--gradient_accumulation_steps={config.gradient_accumulation_steps}",
-            #f"--gradient_checkpointing",
-            f"--learning_rate={config.learning_rate}",
-            f"--lr_scheduler={config.lr_scheduler}",
-            f"--lr_warmup_steps={config.lr_warmup_steps}",
             #f"--num_class_images={N_CLASS_IMAGES}",
-            f"--max_train_steps={MAX_TRAIN_STEPS}",
-            f"--checkpointing_steps={config.checkpointing_steps}",
-        ],
-        check=True,
-    )
+            
+        ]
+    )    
+    # The trained model artefacts have been output to the volume mounted at `MODEL_DIR`.
+    # To persist these artefacts for use in future inference function calls, we 'commit' the changes
+    # to the volume.
+    stub.volume.commit()
+    
+   
 
 """
 The inference function.
@@ -293,46 +335,61 @@ To generate images from prompts using our fine-tuned model, we define a function
 @stub.cls(
     image=image,
     gpu="A100",
-    shared_volumes={str(MODEL_DIR): volume},
+    volumes={str(MODEL_DIR): volume},
 )
 class Model:
     def __enter__(self):
         import torch
-        from diffusers import DPMSolverMultistepScheduler, DDIMScheduler, StableDiffusionPipeline,DiffusionPipeline
+        from diffusers import DiffusionPipeline
 
-        #FOR 1.5 and 2.0 versions
-        # set up a hugging face inference pipeline using our model
-        ddim = DDIMScheduler.from_pretrained(MODEL_DIR,
-            subfolder="scheduler")
-        pipe = StableDiffusionPipeline.from_pretrained(
-            MODEL_DIR,
-            scheduler=ddim,
+        load_options = dict(
             torch_dtype=torch.float16,
-            safety_checker=None,
-        ).to("cuda")
-        self.pipe = pipe
+            use_safetensors=True,
+            variant="fp16",
+            device_map="auto",
+        )
 
-        #FOR 2.1 version ***BUGGY***
-        # Use the DPMSolverMultistepScheduler (DPM-Solver++) scheduler here instead
-        """pipe = StableDiffusionPipeline.from_pretrained(
+        # Load base model
+        self.base = DiffusionPipeline.from_pretrained(
             MODEL_DIR,
-            torch_dtype=torch.float16) 
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-        pipe = pipe.to("cuda")
-        pipe.enable_xformers_memory_efficient_attention()
-        self.pipe = pipe"""
+            **load_options
+        )
+
+        # Load refiner model
+        self.refiner = DiffusionPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-refiner-1.0",
+            text_encoder_2=self.base.text_encoder_2,
+            vae=self.base.vae,
+            **load_options,
+        )
+
+        # These suggested compile commands actually increase inference time, but may be mis-used.
+        # self.base.unet = torch.compile(self.base.unet, mode="reduce-overhead", fullgraph=True)
+        # self.refiner.unet = torch.compile(self.refiner.unet, mode="reduce-overhead", fullgraph=True)
 
     @method()
-    def inference(self, text, config):
-        image = self.pipe(
-            text,
-            height=config.height,
-            width=config.width,
-            negative_prompt = "ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, bad anatomy, bad proportions, cloned face, disfigured, out of frame, extra limbs, bad anatomy, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, mutated hands, fused fingers, too many fingers, long neck, text, letters, signature, web address, copyright name, username, error, extra digit, fewer digits, loadscreen, grid, stock image, a stock photo, promo poster, fat",
+    def inference(self, prompt,config, high_noise_frac=0.8):
+        negative_prompt = "disfigured, ugly, deformed, more than five fingers, less than five fingers"
+        image = self.base(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
             num_inference_steps=config.num_inference_steps,
-            guidance_scale=config.guidance_scale,
+            denoising_end=high_noise_frac,
+            output_type="latent",
+        ).images
 
+        image = self.refiner(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=n_steps,
+            denoising_start=high_noise_frac,
+            image=image,
         ).images[0]
+
+        #import io
+        #byte_stream = io.BytesIO()
+        #image.save(byte_stream, format="PNG")
+        #image_bytes = byte_stream.getvalue()
 
         return image
 
@@ -359,7 +416,7 @@ def fastapi_app():
 
     # Call to the GPU inference function on Modal.
     def go(text):
-        return Model().inference.call(text, config)
+        return Model().inference.remote(text, config)
 
     # set up AppConfig
     config = AppConfig()
@@ -386,7 +443,7 @@ def fastapi_app():
     interface = gr.Interface(
         fn=go,
         inputs="text",
-        outputs=gr.Image(shape=(512, 512)),
+        outputs=gr.Image(shape=(IMAGE_RESOLUTION, IMAGE_RESOLUTION)),
         title=f"Generate images of {instance_phrase}.",
         description=description,
         examples=example_prompts,
