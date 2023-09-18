@@ -1,5 +1,7 @@
 #image files
 *.png
+# IMAGE SET FOLDER
+dreambooth/image_set/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

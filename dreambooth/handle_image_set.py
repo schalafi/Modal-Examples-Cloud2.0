@@ -4,6 +4,7 @@ import logging
 import boto3
 from botocore.exceptions import ClientError
 """
+FROM dir_name (local) GENERTAE the instance_example_urls.txt
 From the dir_name get the images
 to upload to S3 and then generate the urls
 
