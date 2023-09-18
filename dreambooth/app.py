@@ -305,7 +305,7 @@ def train(instance_example_urls):
             f"--learning_rate={config.learning_rate}",
             f"--lr_scheduler={config.lr_scheduler}",
             f"--lr_warmup_steps={config.lr_warmup_steps}",
-            f"--max_train_steps={config.max_train_steps}",
+            f"--max_train_steps={MAX_TRAIN_STEPS}",
             f"--checkpointing_steps={config.checkpointing_steps}",
             #Prior preservation
             #"--with_prior_preservation", #needs more than 40GB of GPU RAM
